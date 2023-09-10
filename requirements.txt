@@ -1,0 +1,11 @@
+appdirs==1.4.4
+cffi==1.15.1
+cryptography==41.0.3
+hkdf==0.0.3
+hwcounter==0.1.1
+lxml==4.9.3
+numpy==1.25.2
+packaging==23.1
+pycparser==2.21
+pyshark==0.6
+termcolor==2.3.0
