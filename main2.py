@@ -1,14 +1,11 @@
 import pyshark
-from decrypt import time_quic_decrypt_initial
-import numpy as np
 import argparse
-from binascii import unhexlify, hexlify
+from binascii import unhexlify
 from hwcounter import Timer
 import hkdf
 import hashlib
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from Crypto.Cipher import AES
-
+from sni_bytes import extract_sni
 
 initial_salt = unhexlify("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
 client_in = unhexlify("00200f746c73313320636c69656e7420696e00")
@@ -19,7 +16,6 @@ quic_hp = unhexlify("00100d746c733133207175696320687000")
 def main(pcap_file):
     pcap_data = pyshark.FileCapture(pcap_file)
     cycles = []
-    cycles_total = []
     i = 0
     for packet in pcap_data:
         if 'udp' in packet:
@@ -50,7 +46,7 @@ def main(pcap_file):
             '''
 
             try:
-                with Timer() as t1:
+                with Timer() as t_total:
                     # flag byte (1B) + version (4B) + DCID len (1B) + SCID len (1B) = 7B
                     if len(udp_payload) <= 7:
                         # not a QUIC Long Header Packet
@@ -103,7 +99,7 @@ def main(pcap_file):
                     first_byte = (udp_payload[next_index] & 0x3f).to_bytes(1, "big")
                     len_bytes = first_byte + udp_payload[next_index+1: next_index+len_of_length]
                     
-                    with Timer() as t2:
+                    with Timer() as t_decrypt:
                         # Length of payload
                         payload_len = int.from_bytes(len_bytes, "big")
                         next_index+=len_of_length
@@ -124,34 +120,44 @@ def main(pcap_file):
                         # Retrive the PKN
                         pkn = int.from_bytes(udp_payload[next_index: next_index+pkn_len+1], "big") ^ int.from_bytes(header_mask[1:pkn_len+2], "big")
                         next_index += pkn_len + 1
-                        payload_len -= pkn_len+1
-                        payload = udp_payload[next_index: next_index+payload_len]
-
-                        key = hkdf.hkdf_expand(client_initial_secret, quic_key, 16, hash=hashlib.sha256)
-                        iv = hkdf.hkdf_expand(client_initial_secret, quic_iv, 12, hash=hashlib.sha256)
-
-                        nonce = pkn ^ int.from_bytes(iv, "big")
-                        nonce = nonce.to_bytes(12, "big")
-
-                        tag = payload[-16:]
-                        payload = payload[:-16]
                         
-                        cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=None)
-                        decryptor = cipher.decryptor()
-                        decrypted_payload = decryptor.update(payload)
+                        with Timer() as t_payload:
+                            payload_len -= pkn_len+1
+                            payload = udp_payload[next_index: next_index+payload_len]
+
+                            key = hkdf.hkdf_expand(client_initial_secret, quic_key, 16, hash=hashlib.sha256)
+                            iv = hkdf.hkdf_expand(client_initial_secret, quic_iv, 12, hash=hashlib.sha256)
+
+                            nonce = pkn ^ int.from_bytes(iv, "big")
+                            nonce = nonce.to_bytes(12, "big")
+
+                            tag = payload[-16:]
+                            payload = payload[:-16]
+                            
+                            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=None)
+                            decryptor = cipher.decryptor()
+                            decrypted_payload = decryptor.update(payload)
+                            # sni = extract_sni(hexlify(decrypted_payload))
+                            with Timer() as t_sni:
+                                sni = extract_sni(decrypted_payload)
+                        
             except Exception as e:
                 continue
-            cycles.append(t2.cycles)
-            cycles_total.append(t1.cycles)
+            cycles.append((t_total.cycles, t_decrypt.cycles, t_payload.cycles, t_sni.cycles))
 
-    c= 0
+    count= 0
     with open("cycles_out.csv", "w") as f:
-        for i, j in zip(cycles, cycles_total):
-            if j>800000:
-                print("skipped :", c)
-                c+=1
+        for c in cycles:
+            if c[0]>800000:
+                print("skipped :", count)
+                count+=1
                 continue
-            f.write(str(i) +","+ str(j) + "\n")
+            identify = c[0] - c[1]
+            hp = c[1] - c[2]
+            payload = c[2] - c[3]
+            sni = c[3]
+
+            f.write(str(identify) +","+ str(hp) +"," +str(payload) +"," + str(sni)+ "\n")
 
 
 if __name__ == '__main__':
