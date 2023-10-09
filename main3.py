@@ -5,7 +5,7 @@ from hwcounter import Timer
 import hkdf
 import hashlib
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from sni_bytes import extract_sni
+from sni_bytes import get_var_len_int, get_tls_from_crypto
 from scapy.utils import rdpcap
 
 initial_salt = unhexlify("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
@@ -172,14 +172,49 @@ def main(pcap_file):
                         cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=None)
                         decryptor = cipher.decryptor()
                         decrypted_payload = decryptor.update(payload)
-                        # sni = extract_sni(hexlify(decrypted_payload))
+                        
+                        # Crypto frame Finding and Rearranging
+                        i = 0
+                        cryptoList = []
+
+                        while(i<len(decrypted_payload)-1):
+                            byte = decrypted_payload[i]
+                            if byte == 0x00: # Padding
+                                # print("Padding")
+                                i = i + 1
+                                continue
+                            elif byte == 0x01: # Ping
+                                # print("Ping")
+                                i = i + 1
+                                continue
+                            elif byte == 0x06: # crypto
+                                i=i+1
+                                cryptoOffset, off = get_var_len_int(decrypted_payload[i:])
+                                i = i + off
+
+                                cryptoLength, off = get_var_len_int(decrypted_payload[i:])
+                                i = i + off
+
+                                data = decrypted_payload[i:i+cryptoLength]
+                                i = i+cryptoLength
+                                
+                                cryptoList.append((cryptoOffset, cryptoLength, data))
+                                continue
+                            else:
+                                raise Exception("Unknown Frame Type", byte)
+                                
+                        cryptoList.sort()
+                        cryptoData = b'' # Rearrangned Crypto Data
+                        for _, _ , data in cryptoList:
+                            cryptoData += data
+
                         with Timer() as t_sni:
-                            sni = extract_sni(decrypted_payload)
-                    
+                            sni = get_tls_from_crypto(cryptoData)   
+                            # print(sni)                        
+
         except Exception as e:
             continue
         cycles.append((t_total.cycles, t_decrypt.cycles, t_payload.cycles, t_sni.cycles))
-        break
 
     count= 0
     with open("cycles_out.csv", "w") as f:
